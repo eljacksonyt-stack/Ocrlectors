@@ -1,171 +1,369 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="es">
 <head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>OCR INE - Mejorado</title>
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
-<style>
-  body{font-family:system-ui,Arial;margin:16px;max-width:800px}
-  input,button{padding:8px 12px;margin:6px 0;border-radius:8px}
-  #preview{max-width:100%;border-radius:8px;margin-top:8px}
-  #progressBar{height:12px;background:#eee;border-radius:8px;overflow:hidden;margin-top:8px}
-  #progressBar > div{height:100%;width:0%;background:#6a2fab}
-  .card{border:1px solid #ddd;padding:10px;border-radius:10px;margin-top:8px}
-  pre{white-space:pre-wrap;word-break:break-word}
-</style>
-</head>
-<body>
-  <h1>OCR INE - prueba</h1>
-
-  <label>Selecciona foto de INE (foto o escaneo):</label><br>
-  <input id="file" type="file" accept="image/*"/>
-
-  <div id="progressBar" style="display:none"><div></div></div>
-  <div id="status" class="card" style="display:none">Estado</div>
-
-  <img id="preview" alt="preview" style="display:none"/>
-  <div class="card">
-    <button id="runBtn">Ejecutar OCR</button>
-    <button id="resetBtn">Reiniciar</button>
-  </div>
-
-  <h3>Texto OCR</h3>
-  <textarea id="ocrText" style="width:100%;height:180px"></textarea>
-
-  <h3>Datos extraídos</h3>
-  <div id="extracted" class="card">
-    <div><strong>Nombre:</strong> <span id="nameVal">-</span></div>
-    <div><strong>CURP:</strong> <span id="curpVal">-</span></div>
-  </div>
-
-<script>
-const fileEl = document.getElementById('file');
-const preview = document.getElementById('preview');
-const runBtn = document.getElementById('runBtn');
-const resetBtn = document.getElementById('resetBtn');
-const ocrText = document.getElementById('ocrText');
-const status = document.getElementById('status');
-const progressBar = document.getElementById('progressBar');
-const progressFill = progressBar.querySelector('div');
-const nameVal = document.getElementById('nameVal');
-const curpVal = document.getElementById('curpVal');
-
-let lastBlob = null;
-
-fileEl.addEventListener('change', async () => {
-  const f = fileEl.files[0];
-  if(!f) return;
-  // show preview
-  preview.src = URL.createObjectURL(f);
-  preview.style.display = 'block';
-  ocrText.value = '';
-  status.style.display = 'none';
-  // preprocess and save blob for OCR
-  lastBlob = await preprocessImage(f);
-});
-
-// Preprocess: resize to max 1600px and convert to grayscale + mild binarize
-async function preprocessImage(file){
-  const imgBitmap = await createImageBitmap(file);
-  const maxDim = 1600;
-  let w = imgBitmap.width, h = imgBitmap.height;
-  if(Math.max(w,h) > maxDim){
-    const scale = maxDim / Math.max(w,h);
-    w = Math.round(w * scale);
-    h = Math.round(h * scale);
-  }
-  const canvas = new OffscreenCanvas(w,h);
-  const ctx = canvas.getContext('2d');
-  ctx.drawImage(imgBitmap,0,0,w,h);
-
-  // get image data and convert to grayscale + adaptive-ish threshold
-  const id = ctx.getImageData(0,0,w,h);
-  const d = id.data;
-  // simple contrast stretch + binarize
-  for(let i=0;i<d.length;i+=4){
-    // grayscale
-    const g = Math.round(0.3*d[i] + 0.59*d[i+1] + 0.11*d[i+2]);
-    // stretch contrast
-    let v = (g - 80) * 1.4 + 80; // simple stretch
-    v = Math.max(0, Math.min(255, v));
-    // threshold: keep some gray for textured areas
-    const thr = v > 140 ? 255 : (v > 90 ? 180 : 0);
-    d[i]=d[i+1]=d[i+2]=thr;
-  }
-  ctx.putImageData(id,0,0);
-  const blob = await canvas.convertToBlob({type:'image/png',quality:0.9});
-  return blob;
-}
-
-runBtn.addEventListener('click', async () => {
-  if(!lastBlob){
-    alert('Primero selecciona una imagen.');
-    return;
-  }
-  progressBar.style.display='block';
-  progressFill.style.width='0%';
-  status.style.display='block';
-  status.textContent = 'Inicializando worker...';
-
-  try{
-    // create worker
-    const worker = Tesseract.createWorker({
-      logger: m => {
-        // show progress (m.progress is fraction; m.status is string)
-        if(m.status && m.progress !== undefined){
-          const pct = Math.round(m.progress * 100);
-          progressFill.style.width = pct + '%';
-          status.textContent = `${m.status} — ${pct}%`;
-        } else if (m.status) {
-          status.textContent = m.status;
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>INE V28 - Corrector de Nombres</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- OpenCV.js para el procesamiento de imagen -->
+    <script async src="https://docs.opencv.org/4.8.0/opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
+    <!-- Tesseract.js para OCR -->
+    <script src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js'></script>
+    <!-- Fuse.js para la búsqueda difusa y corrección -->
+    <script src="https://cdn.jsdelivr.net/npm/fuse.js@6.6.2"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    
+    <style>
+        /* Estilos personalizados para las etiquetas de validación */
+        .tag-correct {
+            background-color: #d1fae5; color: #047857; border: 1px solid #10b981;
+            padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold;
         }
-        // console.log(m);
-      }
-    });
+        .tag-warning {
+            background-color: #fef3c7; color: #b45309; border: 1px solid #f59e0b;
+            padding: 2px 6px; border-radius: 4px; font-size: 10px;
+        }
+        .tag-error {
+            background-color: #fee2e2; color: #b91c1c; border: 1px solid #ef4444;
+            padding: 2px 6px; border-radius: 4px; font-size: 10px; text-decoration: line-through;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-200 font-sans p-4">
 
-    await worker.load();
-    // carga idioma spa (puede tardar)
-    await worker.loadLanguage('spa');
-    await worker.initialize('spa');
+    <div class="max-w-5xl mx-auto">
+        
+        <!-- Encabezado -->
+        <div class="flex justify-between items-center mb-6 bg-gray-800 p-4 rounded-xl border border-gray-700 shadow-lg">
+            <h1 class="text-xl font-bold text-emerald-400 flex items-center gap-2">
+                <i class="fas fa-check-double"></i> Escáner V28 (Corrector)
+            </h1>
+            <div id="status" class="px-3 py-1 bg-gray-700 rounded-full text-xs font-mono">Cargando...</div>
+        </div>
 
-    // mejorar por INE: limitar caracteres
-    await worker.setParameters({
-      tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ÁÉÍÓÚÑ ',
-      preserve_interword_spaces: '1'
-    });
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            
+            <!-- COLUMNA IZQUIERDA: VISUAL -->
+            <div class="space-y-4">
+                <!-- Input de archivo -->
+                <div class="bg-gray-800 p-4 rounded-xl border border-gray-700">
+                    <input type="file" id="fileInput" accept="image/*" disabled class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-emerald-600 file:text-white hover:file:bg-emerald-700 cursor-pointer"/>
+                </div>
+                <!-- Canvas de visualización -->
+                <div id="visual-area" class="hidden">
+                    <canvas id="canvasOutput" class="w-full rounded border border-gray-600"></canvas>
+                </div>
+            </div>
 
-    status.textContent = 'Reconociendo texto...';
-    const { data } = await worker.recognize(lastBlob);
-    ocrText.value = data.text || '';
+            <!-- COLUMNA DERECHA: DATOS Y LOGS -->
+            <div class="space-y-4">
+                <div class="bg-white text-gray-900 p-6 rounded-xl shadow-2xl border-t-4 border-emerald-500 relative">
+                    
+                    <!-- Loader overlay -->
+                    <div id="loader" class="hidden absolute inset-0 bg-white/95 z-20 flex flex-col items-center justify-center rounded-xl">
+                        <i class="fas fa-sync fa-spin text-4xl text-emerald-500 mb-2"></i>
+                        <span class="text-xs font-bold text-emerald-600 uppercase">Verificando Nombres...</span>
+                    </div>
 
-    // extraer CURP y nombre (may require ajustar según OCR)
-    const textUpper = (data.text || '').toUpperCase();
-    const curpMatch = textUpper.match(/[A-Z]{4}\\d{6}[HM][A-Z]{5}\\d{2}/);
-    const nameMatch = textUpper.match(/NOMBRE:?\\s*([A-Z\\sÁÉÍÓÚÑ]{5,120})/);
-    curpVal.textContent = curpMatch ? curpMatch[0] : 'NO DETECTADO';
-    nameVal.textContent = nameMatch ? nameMatch[1].trim() : 'NO DETECTADO';
+                    <h2 class="text-lg font-bold mb-4 border-b pb-2">Datos Validados</h2>
+                    
+                    <form onsubmit="event.preventDefault(); alert('Datos Correctos');">
+                        
+                        <!-- Campo NOMBRE -->
+                        <div class="mb-4">
+                            <label class="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1">Nombre (Corregido)</label>
+                            <input type="text" id="nombre" class="w-full text-lg font-bold p-2 bg-emerald-50 border-l-4 border-emerald-500 focus:bg-white outline-none uppercase text-slate-900" placeholder="...">
+                            <!-- Aquí se insertan las etiquetas de validación -->
+                            <div id="name-feedback" class="mt-2 flex flex-wrap gap-1"></div>
+                        </div>
 
-    await worker.terminate();
-    status.textContent = 'Listo';
-    progressFill.style.width='100%';
-  }catch(err){
-    console.error(err);
-    status.textContent = 'Error: ' + (err.message || err);
-    alert('Error durante OCR. Revisa consola o prueba otra imagen (mejor luz, sin reflejos).');
-  }
-});
+                        <!-- Campo CURP -->
+                        <div class="mb-4">
+                            <label class="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1">CURP</label>
+                            <div class="relative">
+                                <input type="text" id="curp" maxlength="18" class="w-full font-mono text-xl p-2 bg-gray-100 border-l-4 border-emerald-500 outline-none uppercase tracking-widest text-slate-800" placeholder="------------------">
+                                <i id="curp-icon" class="fas fa-check-circle absolute right-3 top-3 text-emerald-500 opacity-0"></i>
+                            </div>
+                        </div>
+                    </form>
+                </div>
 
-resetBtn.addEventListener('click', () => {
-  preview.style.display='none';
-  fileEl.value='';
-  lastBlob = null;
-  ocrText.value='';
-  nameVal.textContent='-';
-  curpVal.textContent='-';
-  status.style.display='none';
-  progressBar.style.display='none';
-});
-</script>
+                <!-- Log de Consola -->
+                <div class="bg-black p-3 rounded border border-gray-700 h-48 overflow-y-auto font-mono text-[10px]">
+                    <p class="text-gray-500 border-b border-gray-800 mb-2 pb-1">LOG DE CORRECCIÓN:</p>
+                    <div id="log-box" class="space-y-1 text-gray-400">Esperando imagen...</div>
+                </div>
+            </div>
+        </div>
+        <img id="imgSrc" class="hidden">
+    </div>
+
+    <script>
+        // --- BASE DE DATOS DE NOMBRES ---
+        // Esta lista ayuda a corregir errores tipográficos comunes del OCR.
+        const COMMON_NAMES = [
+            "GARCIA", "MARTINEZ", "LOPEZ", "GONZALEZ", "RODRIGUEZ", "HERNANDEZ", "PEREZ", "SANCHEZ", "RAMIREZ", "FLORES",
+            "GOMEZ", "TORRES", "DIAZ", "VASQUEZ", "CRUZ", "MORALES", "GUTIERREZ", "REYES", "RUIZ", "JIMENEZ",
+            "MENDOZA", "AGUILAR", "ORTIZ", "ALVAREZ", "CASTILLO", "ROMERO", "MORENO", "CHAVEZ", "RIVERA", "RAMOS",
+            "HERRERA", "MEDINA", "DOMINGUEZ", "VELAZQUEZ", "VEGA", "ESPINOZA", "BLANCO", "NAVARRO", "CORTES", "GUERRERO",
+            "MUNOZ", "ALVARADO", "DELGADO", "ESTRADA", "CONTRERAS", "SALAZAR", "AYALA", "VALENZUELA", "CERVANTES", "ROJAS",
+            "PUGA", "TOVAR", "CALDERON", "SALAS", "VALDEZ", "PACHECO", "RANGEL", "VALENCIA", "NAVA", "MEJIA",
+            "SANTOS", "SOTO", "MONTES", "PENA", "ROBLES", "ACOSTA", "FUENTES", "MOLINA", "ARROYO", "CAMPOS",
+            // NOMBRES DE PILA
+            "JUAN", "JOSE", "LUIS", "MARIA", "GUADALUPE", "FRANCISCO", "ANTONIO", "JESUS", "MIGUEL", "ANGEL",
+            "PEDRO", "ALEJANDRO", "MANUEL", "MARGARITA", "CARLOS", "ROBERTO", "FERNANDO", "DANIEL", "JORGE", "RICARDO",
+            "EDWIN", "ALEXIS", "EDUARDO", "JAVIER", "RAFAEL", "MARTIN", "RAUL", "DAVID", "JOSEFINA", "VERONICA",
+            "ALBERTO", "ENRIQUE", "GERARDO", "MARIO", "ARMANDO", "SERGIO", "GILBERTO", "GABRIEL", "ANDRES", "ADRIAN",
+            "HECTOR", "SALVADOR", "FELIPE", "RUBEN", "SILVIA", "ELIZABETH", "ALICIA", "BEATRIZ", "YOLANDA", "LETICIA",
+            "MARTHA", "TERESA", "GLORIA", "ROSA", "ANA", "ADRIANA", "GABRIELA", "PATRICIA", "ALEJANDRA", "CLAUDIA",
+            "SOFIA", "CAMILA", "VALERIA", "XIMENA", "VICTORIA", "DANIELA", "FERNANDA", "ANDREA", "LUCIA", "VALENTINA",
+            "SANTIAGO", "MATEO", "SEBASTIAN", "LEONARDO", "MATIAS", "EMILIANO", "DIEGO", "SAMUEL", "IKER", "GABRIEL",
+            "ALAN", "EMMANUEL", "OMAR", "OSCAR", "HUGO", "EDGAR", "JULIO", "CESAR", "MARCO", "IVAN"
+        ];
+
+        // Configuración de Fuse.js para encontrar nombres similares
+        const fuse = new Fuse(COMMON_NAMES, {
+            includeScore: true,
+            threshold: 0.35, // Nivel de tolerancia (0.0 es exacto, 1.0 es cualquier cosa)
+            minMatchCharLength: 3
+        });
+
+        let cvReady = false;
+
+        // Función para escribir en el log de pantalla
+        function log(msg, type='info') {
+            const el = document.getElementById('log-box');
+            let color = type === 'ok' ? 'text-emerald-400' : (type === 'warn' ? 'text-yellow-400' : 'text-gray-400');
+            el.innerHTML += `<div class="${color}">> ${msg}</div>`;
+            el.scrollTop = el.scrollHeight;
+        }
+
+        // Callback cuando OpenCV termina de cargar
+        function onOpenCvReady() {
+            cvReady = true;
+            document.getElementById('status').innerText = "LISTO";
+            document.getElementById('status').className = "px-3 py-1 bg-emerald-600 text-white rounded-full text-xs font-bold";
+            document.getElementById('fileInput').disabled = false;
+        }
+
+        // Evento al subir imagen
+        document.getElementById('fileInput').addEventListener('change', (e) => {
+            if(!e.target.files[0]) return;
+            
+            // Reiniciar interfaz
+            document.getElementById('visual-area').classList.remove('hidden');
+            document.getElementById('loader').classList.remove('hidden');
+            document.getElementById('nombre').value = '';
+            document.getElementById('curp').value = '';
+            document.getElementById('name-feedback').innerHTML = '';
+            document.getElementById('log-box').innerHTML = '';
+            
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+                const img = document.getElementById('imgSrc');
+                img.src = ev.target.result;
+                img.onload = () => processImage(img);
+            };
+            reader.readAsDataURL(e.target.files[0]);
+        });
+
+        // --- 1. PROCESAMIENTO VISUAL (OpenCV) ---
+        function processImage(imgElement) {
+            if(!cvReady) return;
+
+            try {
+                let src = cv.imread(imgElement);
+                
+                // 1. Detectar bordes y enderezar la tarjeta (Warp Perspective)
+                let cardMat = detectAndWarp(src);
+                
+                // 2. Recortar el área derecha donde están los datos
+                // Coordenadas ajustadas para INE estándar (1000x630)
+                let rectData = new cv.Rect(270, 100, 700, 500);
+                
+                // Validación de seguridad para no salirnos de la imagen
+                if (rectData.x + rectData.width > cardMat.cols) rectData.width = cardMat.cols - rectData.x;
+                if (rectData.y + rectData.height > cardMat.rows) rectData.height = cardMat.rows - rectData.y;
+                
+                let dataMat = cardMat.roi(rectData);
+
+                // 3. Mejorar la imagen (Escala de Grises + CLAHE)
+                // No usamos binarización agresiva para no romper letras delgadas
+                let gray = new cv.Mat();
+                cv.cvtColor(dataMat, gray, cv.COLOR_RGBA2GRAY);
+                let clahe = new cv.CLAHE(3.0, new cv.Size(8, 8));
+                clahe.apply(gray, gray);
+                
+                // Upscale x2 para mejorar precisión de Tesseract
+                cv.resize(gray, gray, new cv.Size(0,0), 2.0, 2.0, cv.INTER_CUBIC);
+
+                cv.imshow('canvasOutput', gray);
+                
+                // Limpieza de memoria
+                src.delete(); cardMat.delete(); dataMat.delete(); clahe.delete();
+
+                // 4. Ejecutar OCR
+                runOCR(gray);
+
+            } catch (err) {
+                console.error(err);
+                document.getElementById('loader').classList.add('hidden');
+                alert("Error al procesar imagen. Intenta con un fondo más oscuro.");
+            }
+        }
+
+        // Función auxiliar para detectar rectángulo y transformar perspectiva
+        function detectAndWarp(src) {
+            let gray = new cv.Mat();
+            cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+            cv.GaussianBlur(gray, gray, new cv.Size(5, 5), 0);
+            let edges = new cv.Mat();
+            cv.Canny(gray, edges, 75, 200);
+
+            let contours = new cv.MatVector();
+            let hierarchy = new cv.Mat();
+            cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+            let maxArea = 0;
+            let bestContour = null;
+            for (let i = 0; i < contours.size(); ++i) {
+                let cnt = contours.get(i);
+                let area = cv.contourArea(cnt);
+                if (area > 30000) {
+                    let peri = cv.arcLength(cnt, true);
+                    let approx = new cv.Mat();
+                    cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
+                    if (approx.rows === 4 && area > maxArea) {
+                        maxArea = area;
+                        bestContour = approx;
+                    } else { approx.delete(); }
+                }
+            }
+
+            let cardDst = new cv.Mat();
+            let w = 1000, h = 630; // Tamaño objetivo estándar
+
+            if (bestContour) {
+                let points = [];
+                for(let i=0; i<4; i++) points.push({x: bestContour.intPtr(i)[0], y: bestContour.intPtr(i)[1]});
+                // Ordenamiento de puntos para transformación
+                points.sort((a,b) => a.y - b.y);
+                let top = points.slice(0,2).sort((a,b) => a.x - b.x);
+                let bottom = points.slice(2,4).sort((a,b) => a.x - b.x);
+
+                let srcTri = cv.matFromArray(4, 1, cv.CV_32FC2, [top[0].x, top[0].y, top[1].x, top[1].y, bottom[1].x, bottom[1].y, bottom[0].x, bottom[0].y]);
+                let dstTri = cv.matFromArray(4, 1, cv.CV_32FC2, [0,0, w,0, w,h, 0,h]);
+                let M = cv.getPerspectiveTransform(srcTri, dstTri);
+                cv.warpPerspective(src, cardDst, M, new cv.Size(w, h));
+                M.delete(); srcTri.delete(); dstTri.delete(); bestContour.delete();
+            } else {
+                // Fallback si no detecta bordes
+                let scale = 1000 / src.cols;
+                cv.resize(src, cardDst, new cv.Size(1000, src.rows * scale));
+            }
+            gray.delete(); edges.delete(); contours.delete(); hierarchy.delete();
+            return cardDst;
+        }
+
+        // --- 2. OCR Y LÓGICA DE NEGOCIO ---
+        async function runOCR(matImg) {
+            let canvas = document.createElement('canvas');
+            cv.imshow(canvas, matImg);
+            matImg.delete();
+
+            const worker = await Tesseract.createWorker('spa', 1);
+            // Permitimos caracteres especiales temporalmente para no perder info
+            await worker.setParameters({ preserve_interword_spaces: '1' });
+
+            const { data: { text } } = await worker.recognize(canvas);
+            await worker.terminate();
+
+            const lines = text.split('\n').map(l => l.trim().toUpperCase()).filter(l => l.length > 1);
+            
+            // --- A. LÓGICA DE NOMBRE (CON VALIDACIÓN) ---
+            let validNameParts = [];
+            let labelIdx = lines.findIndex(l => l.includes('NOMBRE'));
+            let startIdx = (labelIdx !== -1) ? labelIdx + 1 : 0;
+            
+            // Palabras clave que indican fin del bloque de nombre
+            const stopWords = ['DOMICILIO', 'DOMICI', 'CLAVE', 'ELECTORAL', 'MZA', 'LT', 'COL'];
+
+            for (let i = startIdx; i < lines.length; i++) {
+                let line = lines[i];
+                if (stopWords.some(sw => line.includes(sw)) || /\d/.test(line)) break; // Parada
+
+                let words = line.split(' ');
+                
+                words.forEach(word => {
+                    let clean = word.replace(/[^A-Z]/g, ''); // Limpiar caracteres no alfanuméricos
+                    if (clean.length < 3) return; // Ignorar basura muy corta
+
+                    // VALIDACIÓN CON FUSE.JS
+                    const results = fuse.search(clean);
+                    
+                    if (results.length > 0 && results[0].score < 0.4) {
+                        // Nombre encontrado en BD o muy similar
+                        let bestMatch = results[0].item;
+                        validNameParts.push(bestMatch);
+                        
+                        if (bestMatch === clean) {
+                            log(`"${clean}" validado OK`, 'ok');
+                            addBadge(clean, 'correct');
+                        } else {
+                            log(`"${clean}" corregido a "${bestMatch}"`, 'warn');
+                            addBadge(`${clean} -> ${bestMatch}`, 'warning');
+                        }
+                    } else {
+                        // Nombre desconocido (No está en BD)
+                        log(`"${clean}" desconocido`, 'warn');
+                        // Lo marcamos como error visualmente pero no lo agregamos al input final para limpieza
+                        addBadge(clean, 'error');
+                        
+                        // Opcional: Si quieres agregarlo de todas formas, descomenta:
+                        // validNameParts.push(clean);
+                    }
+                });
+                
+                if (validNameParts.length >= 4) break; // Máximo 4 palabras
+            }
+
+            document.getElementById('nombre').value = validNameParts.join(' ');
+
+            // --- B. LÓGICA DE CURP (18 CARACTERES) ---
+            let fullText = text.replace(/[\n\r]/g, ' ').replace(/\s+/g, ' ');
+            let tokens = fullText.split(' ');
+            let finalCurp = "";
+
+            for (let t of tokens) {
+                let clean = t.replace(/[^A-Z0-9]/g, '');
+                // Patrón CURP: Empieza con 4 letras, longitud mínima 16
+                if (/^[A-Z]{4}[0-9O]{6}/.test(clean) && clean.length >= 16) {
+                    finalCurp = clean.substring(0, 18);
+                    break;
+                }
+            }
+
+            if (finalCurp) {
+                // Corrección de O por 0 e I por 1
+                let arr = finalCurp.split('');
+                [4,5,6,7,8,9,17].forEach(k => { if(arr[k] === 'O') arr[k] = '0'; if(arr[k] === 'I') arr[k] = '1'; });
+                finalCurp = arr.join('');
+                document.getElementById('curp-icon').classList.remove('opacity-0');
+                log(`CURP detectada: ${finalCurp}`, 'ok');
+            }
+
+            document.getElementById('curp').value = finalCurp;
+            document.getElementById('loader').classList.add('hidden');
+        }
+
+        // Función para agregar etiquetas visuales debajo del input de nombre
+        function addBadge(text, type) {
+            const div = document.createElement('div');
+            div.innerText = text;
+            div.className = `tag-${type}`;
+            document.getElementById('name-feedback').appendChild(div);
+        }
+    </script>
 </body>
 </html>
+
